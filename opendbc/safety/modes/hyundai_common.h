@@ -22,6 +22,7 @@ enum {
   HYUNDAI_PARAM_SP_LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE = 2,
   HYUNDAI_PARAM_SP_HAS_LDA_BUTTON = 4,
   HYUNDAI_PARAM_SP_NON_SCC = 8,
+  HYUNDAI_PARAM_SP_BMS_UDS = 16,  // allow read-only UDS polling of the BMS (0x7E4) on the OBD-II port (bus 1)
 };
 
 // common state
@@ -59,6 +60,9 @@ bool hyundai_longitudinal_main_cruise_toggleable = false;
 extern bool hyundai_has_lda_button;
 bool hyundai_has_lda_button = false;
 
+extern bool hyundai_bms_uds;
+bool hyundai_bms_uds = false;
+
 extern bool hyundai_non_scc;
 bool hyundai_non_scc = false;
 
@@ -90,6 +94,7 @@ void hyundai_common_init(uint16_t param) {
   hyundai_longitudinal_main_cruise_toggleable = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE);
   hyundai_has_lda_button = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_HAS_LDA_BUTTON);
   hyundai_non_scc = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_NON_SCC);
+  hyundai_bms_uds = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_BMS_UDS);
 
   hyundai_last_button_interaction = HYUNDAI_PREV_BUTTON_SAMPLES;
 

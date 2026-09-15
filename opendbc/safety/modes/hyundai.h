@@ -29,6 +29,7 @@ const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
   {0x340, 0,       8, .check_relay = true},   /* LKAS11 Bus 0                              */ \
   {0x4F1, scc_bus, 4, .check_relay = false},  /* CLU11 Bus 0 (radar-SCC) or 2 (camera-SCC) */ \
   {0x485, 0,       4, .check_relay = true},   /* LFAHDA_MFC Bus 0                          */ \
+  {0x7E4, 1,       8, .check_relay = false},  /* BMS UDS TX addr Bus 1 (OBD-II port), gated by HYUNDAI_PARAM_SP_BMS_UDS */ \
 
 #define HYUNDAI_LONG_COMMON_TX_MSGS(scc_bus) \
   HYUNDAI_COMMON_TX_MSGS(scc_bus) \
@@ -281,6 +282,20 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   // UDS: Only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
   if (msg->addr == 0x7D0U) {
     if ((GET_BYTES(msg, 0, 4) != 0x00803E02U) || (GET_BYTES(msg, 4, 4) != 0x0U)) {
+      tx = false;
+    }
+  }
+
+  // sunnypilot: BMS UDS polling on the OBD-II port (bus 1). Only read requests to the BMS are allowed:
+  // ISO-TP single frames carrying ReadDataByIdentifier (0x22) or ReadDataByLocalIdentifier (0x21) with
+  // at most 2 bytes of identifier, and flow control frames (0x30 00 00) needed to receive multi-frame responses.
+  if (msg->addr == 0x7E4U) {
+    const uint8_t pci_type = msg->data[0] & 0xF0U;
+    const uint8_t sf_len = msg->data[0] & 0x0FU;
+    const bool read_request = (pci_type == 0x00U) && (sf_len >= 2U) && (sf_len <= 3U) &&
+                              ((msg->data[1] == 0x22U) || (msg->data[1] == 0x21U));
+    const bool flow_control = (msg->data[0] == 0x30U) && (msg->data[1] == 0x00U) && (msg->data[2] == 0x00U);
+    if (!hyundai_bms_uds || !(read_request || flow_control)) {
       tx = false;
     }
   }

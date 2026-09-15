@@ -14,6 +14,7 @@ class HyundaiSafetyFlagsSP:
   LONG_MAIN_CRUISE_TOGGLEABLE = 2
   HAS_LDA_BUTTON = 4
   NON_SCC = 8
+  BMS_UDS = 16  # allow read-only UDS polling of the BMS on the OBD-II port (bus 1)
 
 
 class HyundaiFlagsSP(IntFlag):
@@ -31,3 +32,4 @@ class HyundaiFlagsSP(IntFlag):
   NON_SCC_NO_FCA = 2 ** 8  # not all have FCA
   SPEED_LIMIT_AVAILABLE = 2 ** 9  # platforms with speed limit data available
   HAS_LKAS12 = 2 ** 10
+  BMS_UDS_POLLING = 2 ** 11  # poll the BMS over UDS on the OBD-II port for HV battery state (EvBmsUdsPolling param)
