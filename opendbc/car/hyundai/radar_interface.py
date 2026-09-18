@@ -9,6 +9,8 @@ from opendbc.sunnypilot.car.hyundai.radar_interface_ext import RadarInterfaceExt
 
 RADAR_START_ADDR = 0x500
 RADAR_MSG_COUNT = 32
+# sunnypilot: with stock longitudinal, fall back to empty radar data if the track stream stops for this long (card frames, 100 Hz)
+TRACKS_TIMEOUT_FRAMES = 100
 
 # POC for parsing corner radars: https://github.com/commaai/openpilot/pull/24221/
 
@@ -30,6 +32,7 @@ class RadarInterface(RadarInterfaceBase, RadarInterfaceExt):
 
     self.radar_off_can = CP.radarUnavailable
     self.rcp = get_radar_can_parser(CP)
+    self.frames_since_trigger = 0
 
     if self.rcp is None:
       self.initialize_radar_ext(self.trigger_msg)
@@ -42,8 +45,17 @@ class RadarInterface(RadarInterfaceBase, RadarInterfaceExt):
     self.updated_messages.update(vls)
 
     if self.trigger_msg not in self.updated_messages:
+      # sunnypilot: the track stream on bus 1 can stop while driving (e.g. bus 1 re-routed to the OBD-II port for
+      # EvBmsUdsPolling). With stock longitudinal the tracks are informational only, so keep publishing empty
+      # RadarData instead of going silent, which would invalidate radarState and raise commIssue. With openpilot
+      # longitudinal the silence is left in place so the radar fault surfaces.
+      self.frames_since_trigger += 1
+      if not self.CP.openpilotLongitudinalControl and self.frames_since_trigger > TRACKS_TIMEOUT_FRAMES:
+        self.pts.clear()
+        return RadarInterfaceBase.update(self, None)
       return None
 
+    self.frames_since_trigger = 0
     rr = self._update(self.updated_messages)
     self.updated_messages.clear()
 

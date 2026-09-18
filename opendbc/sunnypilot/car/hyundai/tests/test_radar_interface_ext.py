@@ -119,3 +119,34 @@ class TestRadarInterfaceExt(unittest.TestCase):
       cans = [(0, [CanData(0, b'', 0) for _ in range(5)])]
       rr = RD.update(cans)
       self.assertTrue(rr is None or len(rr.errors) > 0)
+
+
+class TestRadarTracksTimeoutFallback(unittest.TestCase):
+  """If the bus 1 track stream stops with stock longitudinal, the interface must keep publishing empty RadarData
+  at 20 Hz so radard/planner/selfdrived stay valid. With openpilot longitudinal it must stay silent."""
+
+  @staticmethod
+  def _radar(openpilot_long: bool):
+    CarInterface = interfaces[CAR.HYUNDAI_SANTA_FE]
+    CP = CarInterface.get_non_essential_params(CAR.HYUNDAI_SANTA_FE)
+    CP.radarUnavailable = False
+    CP.openpilotLongitudinalControl = openpilot_long
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.HYUNDAI_SANTA_FE)
+    RD = CarInterface.RadarInterface(CP, CP_SP)
+    assert RD.rcp is not None and not RD.radar_off_can
+    return RD
+
+  def test_stock_long_falls_back_after_timeout(self):
+    from opendbc.car.hyundai.radar_interface import TRACKS_TIMEOUT_FRAMES
+    RD = self._radar(openpilot_long=False)
+    outputs = [RD.update([]) for _ in range(TRACKS_TIMEOUT_FRAMES)]
+    self.assertTrue(all(o is None for o in outputs))
+    outputs = [RD.update([]) for _ in range(100)]
+    published = [o for o in outputs if o is not None]
+    self.assertEqual(len(published), 20)
+    self.assertTrue(all(not any(o.errors.to_dict().values()) and len(o.points) == 0 for o in published))
+
+  def test_openpilot_long_stays_silent(self):
+    RD = self._radar(openpilot_long=True)
+    outputs = [RD.update([]) for _ in range(400)]
+    self.assertTrue(all(o is None for o in outputs))
