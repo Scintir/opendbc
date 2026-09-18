@@ -22,7 +22,7 @@ enum {
   HYUNDAI_PARAM_SP_LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE = 2,
   HYUNDAI_PARAM_SP_HAS_LDA_BUTTON = 4,
   HYUNDAI_PARAM_SP_NON_SCC = 8,
-  HYUNDAI_PARAM_SP_BMS_UDS = 16,  // allow read-only UDS polling of the BMS (0x7E4) on the OBD-II port (bus 1)
+  HYUNDAI_PARAM_SP_BMS_UDS = 16,  // allow read-only UDS polling of the BMS (0x7E4) on bus 0 (C-CAN) or bus 1 (OBD-II port)
 };
 
 // common state

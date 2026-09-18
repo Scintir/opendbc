@@ -71,7 +71,7 @@ def checksum(msg):
 
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest, common.SteerRequestCutSafetyTest):
-  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x7E4, 1]]
+  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x7E4, 0], [0x7E4, 1]]
   STANDSTILL_THRESHOLD = 12  # 0.375 kph
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
@@ -201,7 +201,7 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
   )
 
   def test_bms_uds_tx(self):
-    """Read-only BMS UDS requests on bus 1 are allowed only with the BMS_UDS safety param."""
+    """Read-only BMS UDS requests on bus 0 and bus 1 are allowed only with the BMS_UDS safety param."""
     prior_safety_mode = self.safety.get_current_safety_mode()
     prior_safety_param = self.safety.get_current_safety_param()
     for enabled in (False, True):
@@ -210,9 +210,9 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
         self.safety.set_current_safety_param_sp(sp)
         self.safety.set_safety_hooks(prior_safety_mode, prior_safety_param)
         for should_tx, frame in self.BMS_UDS_CASES:
-          self.assertEqual(should_tx and enabled, self._tx(libsafety_py.make_CANPacket(0x7E4, 1, frame)), frame.hex())
-          # never on the vehicle buses
-          self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x7E4, 0, frame)))
+          for bus in (0, 1):
+            self.assertEqual(should_tx and enabled, self._tx(libsafety_py.make_CANPacket(0x7E4, bus, frame)), f"bus {bus} {frame.hex()}")
+          # never on the camera bus
           self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x7E4, 2, frame)))
     self.safety.set_current_safety_param_sp(self.SAFETY_PARAM_SP)
     self.safety.set_safety_hooks(prior_safety_mode, prior_safety_param)
@@ -382,7 +382,7 @@ class TestHyundaiLegacySafetyHEV(TestHyundaiSafety):
 
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
-  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0], [0x38D, 0], [0x483, 0], [0x7D0, 0], [0x7E4, 1]]
+  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0], [0x38D, 0], [0x483, 0], [0x7D0, 0], [0x7E4, 0], [0x7E4, 1]]
 
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485, 0x421, 0x420, 0x50A, 0x389]}
 
@@ -440,7 +440,7 @@ class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
 
 
 class TestHyundaiLongitudinalSafetyCameraSCC(HyundaiLongitudinalBase, TestHyundaiSafety):
-  TX_MSGS = [[0x340, 0], [0x4F1, 2], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0], [0x7E4, 1]]
+  TX_MSGS = [[0x340, 0], [0x4F1, 2], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0], [0x7E4, 0], [0x7E4, 1]]
 
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485, 0x420, 0x421, 0x50A, 0x389]}
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485, 0x421, 0x420, 0x50A, 0x389)}  # LKAS11, LFAHDA_MFC, SCC12, SCC11, SCC13, SCC14
@@ -495,7 +495,7 @@ class TestHyundaiSafetyFCEVLong(TestHyundaiLongitudinalSafety, TestHyundaiSafety
 
 @parameterized_class(LDA_BUTTON)
 class TestHyundaiLongitudinalESCCSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
-  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x7E4, 1]]
+  TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x7E4, 0], [0x7E4, 1]]
 
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485, 0x420, 0x421, 0x50A, 0x389]}
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485, 0x420, 0x421, 0x50A, 0x389)}  # LKAS11, LFAHDA_MFC, SCC12, SCC11, SCC13, SCC14

@@ -29,6 +29,7 @@ const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
   {0x340, 0,       8, .check_relay = true},   /* LKAS11 Bus 0                              */ \
   {0x4F1, scc_bus, 4, .check_relay = false},  /* CLU11 Bus 0 (radar-SCC) or 2 (camera-SCC) */ \
   {0x485, 0,       4, .check_relay = true},   /* LFAHDA_MFC Bus 0                          */ \
+  {0x7E4, 0,       8, .check_relay = false},  /* BMS UDS TX addr Bus 0 (C-CAN), gated by HYUNDAI_PARAM_SP_BMS_UDS       */ \
   {0x7E4, 1,       8, .check_relay = false},  /* BMS UDS TX addr Bus 1 (OBD-II port), gated by HYUNDAI_PARAM_SP_BMS_UDS */ \
 
 #define HYUNDAI_LONG_COMMON_TX_MSGS(scc_bus) \
@@ -286,7 +287,7 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // sunnypilot: BMS UDS polling on the OBD-II port (bus 1). Only read requests to the BMS are allowed:
+  // sunnypilot: BMS UDS polling on bus 0 (C-CAN) or bus 1 (OBD-II port). Only read requests to the BMS are allowed:
   // ISO-TP single frames carrying ReadDataByIdentifier (0x22) or ReadDataByLocalIdentifier (0x21) with
   // at most 2 bytes of identifier, and flow control frames (0x30 00 00) needed to receive multi-frame responses.
   if (msg->addr == 0x7E4U) {
