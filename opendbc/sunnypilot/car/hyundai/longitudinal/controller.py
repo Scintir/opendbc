@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from opendbc.car import structs, DT_CTRL
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.hyundai.values import CarControllerParams
+from opendbc.sunnypilot.car.hyundai.longitudinal.ev_power_limiter import EVPowerLimiter
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import get_car_config, jerk_limited_integrator
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 
@@ -52,6 +53,15 @@ class LongitudinalController:
     self.comfort_band_upper = 0.0
     self.comfort_band_lower = 0.0
     self.stopping = False
+
+    # Cached vehicle state for EV power limiter
+    self._v_ego = 0.0
+    self._pitch = 0.0
+
+    # EV Power Limiter - initialized for PHEV/Hybrid vehicles
+    vehicle_mass = CP.mass if hasattr(CP, 'mass') and CP.mass > 0 else 1807.0
+    self.ev_power_limiter = EVPowerLimiter(mass=vehicle_mass)
+    self.ev_power_saturation = 0.0  # exposed for anti-windup signaling
 
   @property
   def enabled(self) -> bool:
@@ -182,7 +192,10 @@ class LongitudinalController:
     # Skip custom processing if tuning is disabled or radar unavailable
     if not self.enabled:
       self.desired_accel = self.accel_cmd
-      self.actual_accel = self.accel_cmd
+      # Still apply EV power limit even without custom tuning enabled
+      self.desired_accel, self.ev_power_saturation = self.ev_power_limiter.update(
+        self.desired_accel, self._v_ego, self._pitch)
+      self.actual_accel = self.desired_accel
       return
 
     # Reset acceleration when control is inactive
@@ -190,6 +203,9 @@ class LongitudinalController:
       self.desired_accel = 0.0
       self.actual_accel = 0.0
       self.accel_last = 0.0
+      # Keep limiter filters tracking even while inactive (prevents stale state on re-entry)
+      self.ev_power_limiter.update(0.0, self._v_ego, self._pitch)
+      self.ev_power_saturation = 0.0
       return
 
     # Force zero acceleration during stopping
@@ -197,6 +213,10 @@ class LongitudinalController:
       self.desired_accel = 0.0
     else:
       self.desired_accel = float(np.clip(self.accel_cmd, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+
+    # Apply EV power limit before jerk integration (only clips positive accel)
+    self.desired_accel, self.ev_power_saturation = self.ev_power_limiter.update(
+      self.desired_accel, self._v_ego, self._pitch)
 
     # Apply jerk-limited integration to get smooth acceleration
     if not self.CP.radarUnavailable:
@@ -255,11 +275,38 @@ class LongitudinalController:
     long_control_state = actuators.longControlState
     self.accel_cmd = CC.actuators.accel
 
+    # Cache vehicle state for power limiter
+    self._v_ego = CS.out.vEgo
+    self._pitch = CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.0
+
     self.get_stopping_state(actuators)
     self.calculate_jerk(CC, CS, long_control_state)
     self.calculate_accel(CC)
     self.calculate_comfort_band(CC, CS)
     self.get_tuning_state()
+
+    # Feed pipeline context to power limiter for comprehensive logging
+    # Captures every stage in the car-side longitudinal path:
+    #   PID output -> power limiter -> jerk limiter -> CAN message
+    # Note: PID internals (P/I/F) are in openpilot's controlsState log (separate process)
+    if self.ev_power_limiter.logging_enabled:
+      self.ev_power_limiter.set_pipeline_context({
+        # Stage 1: Input from PID (controlsd) - this is what the PID commanded
+        "a_pid": self.accel_cmd,
+        # Stage 2: After hardware clip (CarControllerParams.ACCEL_MIN/MAX)
+        "a_hw_clip": float(np.clip(self.accel_cmd, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX)),
+        # Stage 3: Power limiter output is already in the main log entry (a_cmd -> a_lim)
+        # Stage 4: After jerk-limited integration
+        "a_jerk_out": self.actual_accel,
+        "jerk_upper": self.jerk_upper,
+        "jerk_lower": self.jerk_lower,
+        # Stage 5: Final CAN values (what the vehicle SCC ECU receives)
+        "can_raw": self.tuning.desired_accel,     # SCC12 aReqRaw / SCC_CONTROL aReqRaw
+        "can_val": self.tuning.actual_accel,       # SCC12 aReqValue / SCC_CONTROL aReqValue
+        # Vehicle feedback
+        "long_state": str(long_control_state),
+        "a_ego": CS.out.aEgo,                      # what the car is actually doing
+      })
 
     self.long_control_state_last = long_control_state
 

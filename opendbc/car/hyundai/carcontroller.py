@@ -1,6 +1,7 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
+from openpilot.common.params import Params
 from opendbc.car.lateral import apply_driver_steer_torque_limits, common_fault_avoidance
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
@@ -74,10 +75,28 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.last_button_frame = 0
     self.cancel_counter = 0
 
+    # Feature param reading (throttled to avoid filesystem overhead)
+    self._ev_params = Params()
+    self._ev_param_read_counter = 0
+    self._ev_param_read_interval = 100  # read every 100 frames = 1 second at 100Hz
+
   def update(self, CC, CC_SP, CS, now_nanos):
     EsccCarController.update(self, CS)
     LeadDataCarController.update(self, CC_SP)
     MadsCarController.update(self, self.CP, CC, CC_SP, self.frame)
+
+    # Read EV Power Limit params periodically (every ~1s)
+    self._ev_param_read_counter += 1
+    if self._ev_param_read_counter >= self._ev_param_read_interval:
+      self._ev_param_read_counter = 0
+      try:
+        ev_enabled = self._ev_params.get_bool("EVPowerLimitEnabled")
+        ev_kw = max(20, min(self._ev_params.get("EVPowerLimitKW", return_default=True), 55))
+        ev_logging = self._ev_params.get_bool("EVPowerLimitLogging")
+        self.ev_power_limiter.update_params(ev_enabled, ev_kw, ev_logging)
+      except (ValueError, TypeError):
+        pass
+
     if self.frame % 5 == 0:
       LongitudinalController.update(self, CC, CS)
 
