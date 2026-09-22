@@ -128,6 +128,14 @@ LOG_HIGH_RATE_HZ = 20            # log every cycle during approach events
 LOG_BUFFER_SIZE = 15000          # max entries per log file
 
 
+def _lead_present(lead) -> bool:
+  """radarState.leadOne renamed `status` to `present` upstream; accept either (and the test fake)."""
+  present = getattr(lead, "present", None)
+  if present is None:
+    present = getattr(lead, "status", False)
+  return bool(present)
+
+
 class StoppedVehicleApproach:
   def __init__(self, dt: float = 0.05):
     """Initialize SVA module.
@@ -620,7 +628,7 @@ class StoppedVehicleApproach:
       return mpc_a_target, mpc_should_stop
 
     # Cache lead state
-    if lead is not None and lead.status:
+    if lead is not None and _lead_present(lead):
       self.lead_status = True
       self.lead_d = lead.dRel
       self.lead_v = lead.vLeadK  # Use Kalman-filtered velocity

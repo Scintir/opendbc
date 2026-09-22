@@ -23,7 +23,7 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.stopped_vehicle_approach import
 @dataclass
 class FakeLead:
   """Minimal lead data for testing."""
-  status: bool = True
+  present: bool = True
   dRel: float = 80.0
   vLeadK: float = 0.0
   vLead: float = 0.0
@@ -81,7 +81,7 @@ class TestSVADetection(unittest.TestCase):
 
   def test_no_lead_stays_inactive(self):
     """SVA should stay inactive with no lead."""
-    lead = FakeLead(status=False)
+    lead = FakeLead(present=False)
     for _ in range(10):
       self.sva.update(lead, 20.0, -0.5, False)
     self.assertEqual(self.sva.state, SVAState.INACTIVE)
@@ -215,7 +215,7 @@ class TestSVAStateTransitions(unittest.TestCase):
       self.sva.update(lead, 20.0, -1.0, False)
 
     # Now lose the lead
-    no_lead = FakeLead(status=False)
+    no_lead = FakeLead(present=False)
     for _ in range(20):
       self.sva.update(no_lead, 18.0, -0.5, False)
 
