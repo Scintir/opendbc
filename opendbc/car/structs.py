@@ -166,3 +166,121 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+
+  # EV power limiter signals — kept in lockstep with cereal/custom.capnp
+  # CarStateSP ordinals. carstate_ext writes them; UI / analyzer read them
+  # via the cereal-published message. If this dataclass doesn't declare them,
+  # writes from carstate silently fail to serialize.
+  evLimiterActive: bool = auto_field()
+  evLimiterSetSpeedOffset: float = auto_field()
+  accelDemand: float = auto_field()
+  dteRaw: int = auto_field()
+  estPowerW: float = auto_field()
+  evLimiterUserTargetSpeed: float = auto_field()
+  evLimiterState: int = auto_field()
+  evLimiterGradeAccel: float = auto_field()  # iter9 — was missing → root cause of drive 6-13 "publish 0" bug
+
+  # iter11 telemetry — must lockstep with cereal/custom.capnp CarStateSP @9-@22
+  estPowerRawW: float = auto_field()
+  estPowerCapped: bool = auto_field()
+  estPowerSaturated: bool = auto_field()
+  evModeAssumed: bool = auto_field()
+  evLimiterGradeAccelSource: int = auto_field()
+  evLimiterKalmanRejectReason: int = auto_field()
+  evLimiterIneffectiveResEvents: int = auto_field()
+  evLimiterMaxDeficitViolationFrames: int = auto_field()
+  evLimiterTransitionsBlockedByDwell: int = auto_field()
+  evLimiterTransitionsBlockedBySustain: int = auto_field()
+  evLimiterPowerHighPendingFrames: int = auto_field()
+  abasisFiltered: float = auto_field()
+  aEgoFiltered: float = auto_field()
+  evLimiterRecentTransitions: str = auto_field()
+
+  # iter13 v4 telemetry — must lockstep with cereal/custom.capnp CarStateSP @23-@40.
+  # Capnp enums (EvLimiterBlockReason) serialize as integer ordinals on the dataclass
+  # side; CarController sets these via cereal-published message.
+  evLimiterLastBlockReason: int = auto_field()
+  evModeParamReadOk: bool = auto_field()
+  evLimiterSetRequested: int = auto_field()
+  evLimiterSetEmitted: int = auto_field()
+  evLimiterSetDropped: int = auto_field()
+  evLimiterSetClusterDecrementAcked: int = auto_field()
+  evLimiterSetNoAckEvents: int = auto_field()
+  evLimiterStandstillEntered: int = auto_field()
+  evLimiterStandstillExitedByAchieved: int = auto_field()
+  evLimiterStandstillExitedByNoAckBackoff: int = auto_field()
+  evLimiterStandstillSetRequested: int = auto_field()
+  evLimiterStandstillSetEmitted: int = auto_field()
+  evLimiterStandstillSetDropped: int = auto_field()
+  evLimiterSuspectedSccCancelEvents: int = auto_field()
+  evLimiterFaultInhibitActive: bool = auto_field()
+  evLimiterFaultInhibitReason: int = auto_field()
+  evLimiterAllBtnEmitted: int = auto_field()
+  evLimiterCarControllerLimiterTickRate: int = auto_field()
+
+  # iter14 v2 telemetry — must lockstep with cereal/custom.capnp CarStateSP @41-@56.
+  # Triple-output power estimator (R1-MF3): control path uses estPowerControlW, NOT
+  # the HUD-smoothed estPowerW. estPowerInstantW is forensic-only.
+  estPowerInstantW: float = auto_field()
+  estPowerControlW: float = auto_field()
+  evLimiterPowerCappedSustainFrames: int = auto_field()
+  evLimiterPowerNearBudgetSustainFrames: int = auto_field()
+  evLimiterEstPowerRawIsFiltered: bool = auto_field()
+
+  # Transition-decision instrumentation (R1-MF1): every-frame candidate vs final state
+  # so we can diagnose why iter13's existing line-1450 transition didn't fire on episode #1.
+  evLimiterStatePriorTransition: int = auto_field()
+  evLimiterStateCandidateBeforeGuard: int = auto_field()
+  evLimiterStateAfterPowerGuard: int = auto_field()
+  evLimiterPowerGuardYieldReason: str = auto_field()
+  evLimiterPowerGuardLockoutActive: bool = auto_field()
+  evLimiterRecoveryYieldEvents: int = auto_field()
+  evLimiterRecoveryLockoutsEntered: int = auto_field()
+
+  # iter15 v2 telemetry — must lockstep with cereal/custom.capnp CarStateSP @53-@69.
+  # Hard-preempt fix (Section A)
+  evLimiterGuardForcedTransition: bool = auto_field()
+  evLimiterGuardForcedTransitionEvents: int = auto_field()
+
+  # Grade clamp (Section B); raw may exceed cap (R2-MF-2)
+  evLimiterGradePowerRawW: float = auto_field()
+  evLimiterGradePowerCappedFrames: int = auto_field()
+
+  # Long-standstill narrow reset (Section C)
+  evLimiterLongStandstillResets: int = auto_field()
+
+  # Post-RES quiet (Section D)
+  evLimiterPostResQuietActive: bool = auto_field()
+  evLimiterSoftcapDecrementSuppressedFrames: int = auto_field()
+  evLimiterSoftcapDecrementSuppressedEvents: int = auto_field()
+
+  # @61-@62 RESERVED for iter16 HEV CAN passive — DO NOT IMPLEMENT in iter15
+  evLimiterReservedIter16A: int = auto_field()
+  evLimiterReservedIter16B: int = auto_field()
+
+  # Edge-detected recovery yield episodes (Section A)
+  evLimiterRecoveryYieldEpisodes: int = auto_field()
+
+  # Long-standstill state vector telemetry (Section C R1-MF-C)
+  evLimiterStandstillExitStateSnapshot: str = auto_field()
+  evLimiterStandstillExitTimeS: float = auto_field()
+  evLimiterStandstillExitToFirstResLatencyFrames: int = auto_field()
+  evLimiterLongStandstillPrelaunchBackoffCleared: int = auto_field()
+  evLimiterLongStandstillSoftcapReasonCleared: int = auto_field()
+
+  # Post-RES informational override (Section D)
+  evLimiterPostResHardOverrideEvents: int = auto_field()
+
+  # iter16a — live request indicator (intent vs emitted vs honored)
+  evLimiterRequestDir: int = auto_field()        # 0 NONE, 1 UP(want_res), 2 DOWN(want_set)
+  evLimiterButtonDir: int = auto_field()         # 0 NONE, 1 UP(RES), 2 DOWN(SET) — actual emitted
+  evLimiterRequestHonored: int = auto_field()    # 0 unknown, 1 honored, 2 ignored
+
+  # iter16a — real HEV power ground truth (passive)
+  evLimiterRealMotorPowerW: float = auto_field()   # W; NaN if unavailable
+  evLimiterRealPowerSource: int = auto_field()     # 0 invalid, 1 motor CAN, 2 battery VxI
+
+  # iter16a — C1 below-vEgo power droop LOG-ONLY (default-off)
+  evLimiterPowerDroopWouldEnter: bool = auto_field()
+  evLimiterPowerDroopRequestMph: float = auto_field()
+  evLimiterPowerDroopActive: bool = auto_field()

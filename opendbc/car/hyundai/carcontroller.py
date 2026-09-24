@@ -1,3 +1,4 @@
+import collections
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
@@ -13,6 +14,14 @@ from opendbc.sunnypilot.car.hyundai.icbm import IntelligentCruiseButtonManagemen
 from opendbc.sunnypilot.car.hyundai.longitudinal.controller import LongitudinalController
 from opendbc.sunnypilot.car.hyundai.lead_data_ext import LeadDataCarController
 from opendbc.sunnypilot.car.hyundai.mads import MadsCarController
+from opendbc.sunnypilot.car.hyundai.ev_limiter import EVLimiter
+from opendbc.sunnypilot.car.hyundai.car_controller_button_limiter import (
+  ClusterButtonRateLimiter, ButtonEmitContext, BlockReason, burst_copies_for,
+)
+
+# iter13 v4: debounce / physical-button history windows (frames @ 100Hz)
+BRAKE_GAS_DEBOUNCE_FRAMES = 30   # 300ms after release still counts (R4-MF4)
+PHYSICAL_CRUISE_BTN_WINDOW_FRAMES = 20  # 200ms physical-button conflict window
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -67,6 +76,21 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.params = CarControllerParams(CP)
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.angle_limit_counter = 0
+    self.ev_limiter = EVLimiter(CP, CP_SP)
+
+    # iter13 v4: authoritative wire-side button rate limiter. EVLimiter is
+    # advisory; ALL CLU11 button injection passes through this gate.
+    self.button_rate_limiter = ClusterButtonRateLimiter()
+
+    # State for ButtonEmitContext (300ms debounce / 200ms physical-button window).
+    # Each is a deque of frame indices (recent press timestamps).
+    self._brake_press_history: collections.deque = collections.deque()
+    self._gas_press_history: collections.deque = collections.deque()
+    self._physical_cruise_btn_history: collections.deque = collections.deque()
+    self._prev_cruise_enabled = False
+    # Standstill-slice counters owned by CarController (wire-side).
+    self._standstill_set_emitted = 0
+    self._standstill_set_dropped = 0
 
     self.accel_last = 0
     self.apply_torque_last = 0
@@ -138,6 +162,160 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
 
     # Intelligent Cruise Button Management
     can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN))
+
+    # iter13 v4: EV power limiter (classic-CAN HYBRID stock-long only).
+    #
+    # EVLimiter is advisory: it computes a desired button (None / SET / RES) and
+    # an advisory block reason. CarController is authoritative — every CLU11
+    # button frame passes through ClusterButtonRateLimiter.maybe_emit() which
+    # owns the wire-side safety invariants:
+    #   - SET frames /  100ms ≤ 1
+    #   - SET frames /  500ms ≤ 3   (R4-MF1 — drive 17 cancel pattern)
+    #   - SET frames / 1000ms ≤ 4
+    #   - All-button frames /  100ms ≤ 1
+    #   - All-button frames / 1000ms ≤ 6
+    #   - No multiple injected buttons same frame
+    #   - Brake/gas/300ms-debounce / driver-button-conflict / fault-inhibit
+    #     unconditional blocks (D2 reorder: physical state BEFORE latch)
+    #
+    # Limiter must never crash the car controller; the entire block is wrapped.
+    if not self.CP.flags & HyundaiFlags.CANFD:
+      try:
+        # Phase 3: EVLimiter still emits via legacy (button, active) return —
+        # we ignore that return and read the advisory `_desired_button` instead.
+        # Both code paths produce the same desired_button this tick (the legacy
+        # `button` value is identical to `_desired_button`).
+        self.ev_limiter.update(CC, CS, self.frame)
+
+        # --- Build the per-frame ButtonEmitContext ---------------------------
+        cs_out = CS.out
+        cur_brake = bool(cs_out.brakePressed)
+        cur_gas = bool(cs_out.gasPressed)
+        cur_cruise_enabled = bool(cs_out.cruiseState.enabled)
+
+        # Update brake/gas history (R4-MF4 300ms debounce).
+        if cur_brake:
+          self._brake_press_history.append(self.frame)
+        if cur_gas:
+          self._gas_press_history.append(self.frame)
+        # Trim history older than 300ms.
+        while (self._brake_press_history
+               and self._brake_press_history[0] < self.frame - BRAKE_GAS_DEBOUNCE_FRAMES):
+          self._brake_press_history.popleft()
+        while (self._gas_press_history
+               and self._gas_press_history[0] < self.frame - BRAKE_GAS_DEBOUNCE_FRAMES):
+          self._gas_press_history.popleft()
+        recent_brake_300ms = len(self._brake_press_history) > 0 and not cur_brake
+        recent_gas_300ms = len(self._gas_press_history) > 0 and not cur_gas
+
+        # Physical (driver) cruise-button window (200ms). Track NEW physical
+        # button events from cs_out.buttonEvents (NOT injected). Note: our
+        # injected buttons get filtered by EVLimiter's echo filter, but for
+        # the circuit-breaker exclusion, we count any non-echo physical event.
+        try:
+          for be in cs_out.buttonEvents:
+            if be.pressed and be.type in (
+                structs.CarState.ButtonEvent.Type.cancel,
+                structs.CarState.ButtonEvent.Type.accelCruise,
+                structs.CarState.ButtonEvent.Type.decelCruise,
+                structs.CarState.ButtonEvent.Type.gapAdjustCruise,
+                structs.CarState.ButtonEvent.Type.altButton1,
+                structs.CarState.ButtonEvent.Type.altButton2,
+                structs.CarState.ButtonEvent.Type.altButton3):
+              self._physical_cruise_btn_history.append(self.frame)
+              break
+        except Exception:
+          pass
+        while (self._physical_cruise_btn_history
+               and self._physical_cruise_btn_history[0]
+                   < self.frame - PHYSICAL_CRUISE_BTN_WINDOW_FRAMES):
+          self._physical_cruise_btn_history.popleft()
+        recent_physical_btn_200ms = len(self._physical_cruise_btn_history) > 0
+
+        # System-state fields. Hyundai exposes some via CarState; others are
+        # not on Hyundai CAN — use safe defaults.
+        try:
+          gear_drive = (cs_out.gearShifter == structs.CarState.GearShifter.drive)
+        except Exception:
+          gear_drive = True
+        door_open = bool(getattr(cs_out, "doorOpen", False))
+        seatbelt_buckled = not bool(getattr(cs_out, "seatbeltUnlatched", False))
+        # cruiseControlAvailable: not always exposed; treat absent as available.
+        cruise_available = bool(getattr(cs_out, "cruiseControlAvailable", True))
+        system_unavailable = not cruise_available
+        bus_failsafe = False  # Hyundai CarState has no direct bus-fail flag here
+        cluster_invalid = False  # could read CLU13 invalid bits in future
+
+        ctx = ButtonEmitContext(
+          cruise_enabled=cur_cruise_enabled,
+          brake_pressed=cur_brake,
+          gas_pressed=cur_gas,
+          recent_brake_300ms=recent_brake_300ms,
+          recent_gas_300ms=recent_gas_300ms,
+          recent_physical_cruise_btn_200ms=recent_physical_btn_200ms,
+          bus_failsafe=bus_failsafe,
+          cluster_invalid=cluster_invalid,
+          gear_drive=gear_drive,
+          door_open=door_open,
+          seatbelt_buckled=seatbelt_buckled,
+          system_unavailable=system_unavailable,
+          advisory_block_reason=getattr(self.ev_limiter,
+                                          "_desired_block_reason_advisory",
+                                          BlockReason.none),
+        )
+
+        # --- Authoritative gate ---------------------------------------------
+        desired = getattr(self.ev_limiter, "_desired_button", None)
+        emitted = self.button_rate_limiter.maybe_emit(desired, ctx, self.frame)
+
+        if emitted is not None:
+          burst = burst_copies_for(emitted)
+          can_sends.extend(
+            [hyundaican.create_clu11(self.packer, self.frame, CS.clu11, emitted, self.CP)] * burst
+          )
+
+        # R4-MF3: register emitted SET into EVLimiter's ACK matcher AFTER
+        # rate-limiter acceptance. Dropped SETs are NOT registered.
+        if emitted == Buttons.SET_DECEL:
+          self.ev_limiter.note_set_emitted(self.frame)
+
+        # Standstill-slice (wire-side) counter ownership (R4-MF6).
+        if getattr(self.ev_limiter, "_was_in_prelaunch", False):
+          if emitted == Buttons.SET_DECEL:
+            self._standstill_set_emitted += 1
+          elif desired == Buttons.SET_DECEL and emitted is None:
+            self._standstill_set_dropped += 1
+
+        # Circuit-breaker tick (Section G).
+        self.button_rate_limiter.detect_and_latch_suspected_cancel(
+          self._prev_cruise_enabled, cs_out, self.frame,
+          recent_brake_300ms, recent_gas_300ms, recent_physical_btn_200ms)
+        self.button_rate_limiter.maybe_release_fault_inhibit(
+          self._prev_cruise_enabled, cur_cruise_enabled, self.frame)
+
+        self._prev_cruise_enabled = cur_cruise_enabled
+
+        # Publish wire-side telemetry into the EVLimiter shared state so
+        # carstate_ext picks it up (matches existing user_target/state pattern).
+        try:
+          from opendbc.sunnypilot.car.hyundai.ev_limiter import _SHARED_STATE
+          _SHARED_STATE["set_emitted"] = int(self.button_rate_limiter.set_emitted)
+          _SHARED_STATE["set_dropped"] = int(self.button_rate_limiter.set_dropped)
+          _SHARED_STATE["all_btn_emitted"] = int(self.button_rate_limiter.all_btn_emitted)
+          _SHARED_STATE["last_block_reason"] = str(self.button_rate_limiter.last_block_reason)
+          _SHARED_STATE["suspected_scc_cancel_events"] = int(
+            self.button_rate_limiter.suspected_scc_cancel_events)
+          _SHARED_STATE["fault_inhibit_active"] = bool(
+            self.button_rate_limiter.fault_inhibit_active)
+          _SHARED_STATE["fault_inhibit_reason"] = str(
+            self.button_rate_limiter.fault_inhibit_reason)
+          _SHARED_STATE["standstill_set_emitted"] = int(self._standstill_set_emitted)
+          _SHARED_STATE["standstill_set_dropped"] = int(self._standstill_set_dropped)
+        except Exception:
+          pass
+      except Exception as e:
+        # Print rather than log — the controller may run before cloudlog init
+        print(f"[ev_limiter] update suppressed: {type(e).__name__}: {e}")
 
     new_actuators = actuators.as_builder()
     new_actuators.torque = apply_torque / self.params.STEER_MAX

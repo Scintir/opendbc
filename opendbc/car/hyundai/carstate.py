@@ -332,7 +332,17 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     if CP.flags & HyundaiFlags.CANFD:
       return self.get_can_parsers_canfd(CP)
 
+    pt_msgs = []
+    if CP.flags & HyundaiFlags.HYBRID:
+      # iter6: pre-register ESP12 explicitly so carstate_ext.py can read
+      # ESP12.LONG_ACCEL for the grade-aware EV power estimate. Lazy
+      # `cp.vl["ESP12"]` access silently failed in iter5 (drive #5: 173k
+      # samples of evLimiterGradeAccel = 0.0). math.nan as freq sets
+      # MessageState.ignore_alive=True so a missing ESP12 on some HYBRID
+      # variant cannot take down the parser's can_valid.
+      pt_msgs.append(("ESP12", math.nan))
+
     return {
-      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 0),
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_msgs, 0),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
     }
