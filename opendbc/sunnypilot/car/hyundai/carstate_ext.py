@@ -59,15 +59,14 @@ AERO_DRAG_COEFF = 0.75                    # CdA (m²); Santa Fe is boxier than t
 # air density via liveLocationKalman.positionGeodetic.value[2] altitude.
 AIR_DENSITY_KG_M3 = 1.10
 
-# Asymmetric LP filter on the published estPowerW. User feedback (drive #6):
-# the IMU-derived grade signal is noisy → estPowerW HUD reads erratically.
-# Fast rise (capture spikes), slow fall (smooth display).
-# iter9: drive #7 showed `max(raw, filtered)` was locking in positive
-# transients from grade noise — published value ran ~2x actual motor power
-# on highway. Now publish filtered only; the ~150 ms rise lag is acceptable
-# since SCC's accel demand doesn't ramp instantaneously.
-POWER_TAU_RISE_S = 0.15                   # 150 ms tau — spikes captured almost immediately
-POWER_TAU_FALL_S = 2.0                    # 2 s tau — slow decay, stable HUD
+# HUD LP filter on the published estPowerW.
+# iter7-iter16: asymmetric (150 ms rise / 2 s fall). Drive 2026-09-24 forensics:
+# with a jittery accel input (|ΔaBasis| p90 0.28 m/s² frame-to-frame at 70 mph
+# = ±17 kW) the fast-rise/slow-fall pair rectifies noise — HUD p50 sat ~8 kW
+# above the instantaneous p50 on flat highway. iter17: symmetric 0.5 s so the
+# HUD shows the mean, not the envelope. The control path keeps its own filter.
+POWER_TAU_RISE_S = 0.5
+POWER_TAU_FALL_S = 0.5
 DT_CLAMP_MIN_S = 0.001                    # safety: never let dt blow up alpha
 DT_CLAMP_MAX_S = 0.1                      # 100 ms (10x nominal)
 
@@ -79,29 +78,40 @@ DT_CLAMP_MAX_S = 0.1                      # 100 ms (10x nominal)
 POWER_CONTROL_TAU_RISE_S = 0.05           # 50 ms — basically tracks instant
 POWER_CONTROL_TAU_FALL_S = 0.30           # 300 ms — fast enough to reflect demand drops
 
-# Grade dead-band (iter9 → iter15).
-# iter9 history: `(LONG_ACCEL - aEgo)` had a +0.025 m/s² mean bias and p90 of
-# +0.38, which the asymmetric LP + max(raw, filtered) pipeline locked in as
-# ~22 kW phantom grade contribution on flat highway. Subtract a deadband
-# floor before adding grade to power; sub-deadband-grades shouldn't be
-# triggering the limiter (gentle highway slopes don't push motor power into
-# ICE territory anyway).
-# iter15 v2 R1-MF-B: raised 0.10 → 0.20. At 70 mph this filters out 12 kW
-# worth of phantom grade power (drives A/B forensics showed grade contribution
-# was a dominant over-read term, peaks 12-27 kW above true on flatish road).
-GRADE_DEADBAND_MS2 = 0.20
+# iter17 — estimator rebuilt on MEASURED accel + grade (drive 2026-09-24 forensics,
+# docs/ev-limiter/drive-2026-09-24-forensics.md):
+#   * TCS13.aBasis already contains the grade component (at steady speed it tracks
+#     kalman grade 1:1), so `m·v·aBasis + m·v·grade` double-counted hills, and the
+#     iter11 saturation detector then misfired on steep grades (aBasis ≫ aEgo) and
+#     zeroed the term. aBasis is also jittery. It is no longer used for power; it is
+#     still published as accelDemand for the SCC-decel detector in ev_limiter.
+#   * Wheel power is now m·v·max(0, aEgo_f + grade) + road_load, with aEgo LP'd at
+#     AEGO_FILTER_TAU_S and grade from the calibrated kalman pitch (or the
+#     LONG_ACCEL fallback, where aEgo + (LONG_ACCEL - aEgo) = LONG_ACCEL).
+#   * Battery power = wheel power / η(v) + aux. The old model was wheel power only,
+#     which under-reads launches (F·v is small at low v while motor/inverter losses
+#     are largest) and reads ~0 when creeping with HVAC on.
+# The iter9 grade deadband and the iter15 grade cap are retired: they only existed
+# to fight noise and double counting in the aBasis-based formula. The raw grade
+# power is still published (evLimiterGradePowerRawW); the capped-frames counter
+# now stays 0.
+AEGO_FILTER_TAU_S = 0.2                   # ~0.2 s LP on aEgo (wheel-speed derivative is noisy)
+AEGO_FILTER_ALPHA = GRADE_FILTER_DT_S / (AEGO_FILTER_TAU_S + GRADE_FILTER_DT_S)
+EFFICIENCY_LOW_SPEED = 0.72               # motor+inverter+gear η at launch (high torque, low rpm)
+EFFICIENCY_HIGHWAY = 0.90                 # η once cruising
+EFFICIENCY_RAMP_END_MS = 45.0 / 2.2369    # linear ramp from 0 → 45 mph
+AUX_POWER_DEFAULT_W = 2500.0              # HVAC + DC-DC + accessories baseline
+AUX_POWER_MIN_W = 0.0
+AUX_POWER_MAX_W = 10_000.0
 
-# iter15 v2 — ANTI-OVERREAD CLAMP on grade contribution. This is NOT physically
-# accurate modeling of grade power — on real 5% grades, true grade power is
-# ~30 kW (m·g·grade·v: 1950·9.81·0.05·31.7 ≈ 30.3 kW). The clamp INTENTIONALLY
-# UNDERCOUNTS sustained real hills to avoid false-positive over-cap on noisy
-# grade readings (IMU pitch noise + LP transients). Trade-off: under-active
-# limiter on real long hills. Drive review on known uphill of >0.30 m/s²
-# must check that this doesn't cause ICE engagement on actual highway grades.
-# Parameterized as EvLimiterGradeContribCapKW (default 10, bounds 5-30).
-GRADE_CONTRIB_CAP_DEFAULT_KW = 10
-GRADE_CONTRIB_CAP_MIN_KW = 5
-GRADE_CONTRIB_CAP_MAX_KW = 30
+
+def drivetrain_efficiency(v_ego_ms: float) -> float:
+  """Battery→wheel efficiency vs speed. Linear EFFICIENCY_LOW_SPEED →
+  EFFICIENCY_HIGHWAY over 0 → EFFICIENCY_RAMP_END_MS, flat after."""
+  if v_ego_ms <= 0.0:
+    return EFFICIENCY_LOW_SPEED
+  frac = min(1.0, v_ego_ms / EFFICIENCY_RAMP_END_MS)
+  return EFFICIENCY_LOW_SPEED + (EFFICIENCY_HIGHWAY - EFFICIENCY_LOW_SPEED) * frac
 
 
 def road_load_power_w(v_ego_ms: float) -> float:
@@ -166,17 +176,13 @@ class CarStateExt:
     self._assume_ev_only_param_read_ok = False
     self._abasis_filtered = 0.0
     self._aego_filtered = 0.0
-    self._saturation_entry_frames = 0
-    self._saturation_exit_frames = 0
-    self._saturation_active = False
 
-    # iter15 v2 (Section B) — grade contribution anti-overread CLAMP.
-    # Fail-closed read; bounds-clamped to [5, 30] kW. Read once at construction;
-    # changes require restart (matches EvLimiterMotorCapKW behavior).
-    self._grade_contrib_cap_w = self._read_grade_contrib_cap_param()
-    # Diagnostic: cumulative frames where grade_power_raw exceeded the cap.
+    # iter17: aux baseline, set by card.py each tick (EvLimiterAuxPowerW); default
+    # AUX_POWER_DEFAULT_W when the attribute was never written (tests, bring-up).
+    self._aux_power_w = AUX_POWER_DEFAULT_W
+    # Telemetry kept from iter15: raw (uncapped) grade power each frame; the
+    # capped-frames counter is retired (no cap any more) and stays 0.
     self._grade_power_capped_frames = 0
-    # Last frame's raw (pre-clamp) grade power, published every frame for forensics.
     self._grade_power_raw_w_last = 0.0
 
     # iter16a (Phase E1) — real HEV power ground truth (passive decode). Absent =>
@@ -197,20 +203,6 @@ class CarStateExt:
       return kw * 1000.0
     except Exception:
       return 60_000.0
-
-  def _read_grade_contrib_cap_param(self) -> float:
-    """iter15 v2 (Section B): EvLimiterGradeContribCapKW — anti-overread cap on
-    the grade contribution to estPower*. Default 10 kW, bounded to [5, 30] kW.
-    Fail-closed to default. Mirrors `_read_motor_cap_param` shape exactly."""
-    try:
-      from openpilot.common.params import Params
-      raw = Params().get("EvLimiterGradeContribCapKW")
-      if raw is None: return GRADE_CONTRIB_CAP_DEFAULT_KW * 1000.0
-      kw = max(GRADE_CONTRIB_CAP_MIN_KW,
-               min(int(raw), GRADE_CONTRIB_CAP_MAX_KW))
-      return kw * 1000.0
-    except Exception:
-      return GRADE_CONTRIB_CAP_DEFAULT_KW * 1000.0
 
   def _read_assume_ev_only_param(self) -> bool:
     """iter13 v4: param read moved to card.py (selfdrive/car/card.py) so the
@@ -258,6 +250,12 @@ class CarStateExt:
     # (early bring-up, tests, or after a plumbing failure).
     self._assume_ev_only = bool(getattr(self, 'assume_ev_only', False))
     self._assume_ev_only_param_read_ok = bool(getattr(self, 'assume_ev_only_param_read_ok', False))
+    # iter17: aux baseline from card.py (EvLimiterAuxPowerW), bounds-clamped.
+    try:
+      aux = float(getattr(self, 'aux_power_w', AUX_POWER_DEFAULT_W))
+    except (TypeError, ValueError):
+      aux = AUX_POWER_DEFAULT_W
+    self._aux_power_w = min(AUX_POWER_MAX_W, max(AUX_POWER_MIN_W, aux))
 
     self.aBasis = cp.vl["TCS13"]["aBasis"]
 
@@ -395,59 +393,22 @@ class CarStateExt:
         print(f"[ev_limiter] WARNING: grade_filter ({src}) stuck at 0.0 for 10 s — "
               "grade-aware power is degraded to flat-only", file=sys.stderr)
         self._grade_filter_zero_warning_logged = True
-      # Only the uphill component contributes to ICE-engagement risk.
-      # Negative SCC accel command (commanded decel) does NOT cancel positive
-      # grade contribution: drive #6's 7:40 ICE event had aBasis=-0.4 with
-      # grade=+0.4, and iter6's `max(0, abasis+grade)` read 0 even though the
-      # motor was doing real work to hold 73 mph against grade. Iter7 clamps
-      # both positive separately so grade always counts and decel never cancels.
-      # iter9: subtract GRADE_DEADBAND_MS2 floor before counting — kills the
-      # +0.025 m/s² bias from LONG_ACCEL-aEgo derivation that produced ~22 kW
-      # phantom grade contribution on flat highway in drive #7.
-      uphill_grade = max(0.0, grade_f - GRADE_DEADBAND_MS2)
-
-      # iter11 Fix E: abasis/aEgo saturation detection. When commanded accel
-      # demand >> actual ego accel for sustained period, motor is power-saturated
-      # and abasis no longer represents delivered power. Substitute LP-filtered
-      # aEgo to avoid over-reading. Hysteresis prevents flapping.
+      # iter17 power path (see module header). aEgo is LP'd (wheel-speed
+      # derivative is noisy); grade is the kalman/LONG_ACCEL-derived value
+      # above. Both keep their sign: a downhill cancels an equal acceleration,
+      # an uphill adds to it. Only the positive (motoring) sum draws power.
       a_ego_signal = float(ret.aEgo)
-      self._abasis_filtered += 0.1 * (abasis - self._abasis_filtered)
-      self._aego_filtered += 0.1 * (a_ego_signal - self._aego_filtered)
-      ABASIS_AEGO_DIVERGENCE_MS2 = 0.3
-      if (self._abasis_filtered > ABASIS_AEGO_DIVERGENCE_MS2
-          and self._aego_filtered < self._abasis_filtered - ABASIS_AEGO_DIVERGENCE_MS2):
-        self._saturation_entry_frames += 1
-        self._saturation_exit_frames = 0
-      else:
-        self._saturation_exit_frames += 1
-        self._saturation_entry_frames = 0
-      if not self._saturation_active and self._saturation_entry_frames >= 50:    # 0.5s
-        self._saturation_active = True
-      elif self._saturation_active and self._saturation_exit_frames >= 30:       # 0.3s
-        self._saturation_active = False
-      abasis_for_power = max(0.0, self._aego_filtered) if self._saturation_active else max(0.0, abasis)
+      self._abasis_filtered += 0.1 * (abasis - self._abasis_filtered)   # telemetry only
+      self._aego_filtered += AEGO_FILTER_ALPHA * (a_ego_signal - self._aego_filtered)
+      a_net = self._aego_filtered + grade_f
 
-      # iter15 v2 (Section B) — grade contribution CLAMP (anti-overread).
-      # Decompose: the abasis term is unchanged; grade term is the slice clamped
-      # at `_grade_contrib_cap_w` (default 10 kW). Raw published unclamped for
-      # forensics (R2-MF-2: raw MAY exceed cap; only the clamped value enters
-      # p_accel_grade_w).
-      grade_power_raw_w = VEHICLE_MASS_KG * v_ego * uphill_grade
-      cap_w = self._grade_contrib_cap_w
-      grade_power_clamped_w = min(grade_power_raw_w, cap_w)
-      if grade_power_raw_w > cap_w:
-        self._grade_power_capped_frames += 1
+      # Telemetry: raw grade power (uncapped, uphill only) — same definition as
+      # iter15 minus the deadband. Not an input to the estimate on its own.
+      grade_power_raw_w = VEHICLE_MASS_KG * v_ego * max(0.0, grade_f)
       self._grade_power_raw_w_last = grade_power_raw_w
 
-      # Power = mass × v × commanded-accel  +  grade-power-CLAMPED  +  steady-state road load.
-      # Road load (rolling resistance + aero drag) is the missing baseline iter5/6
-      # ignored — at 73 mph it's ~23 kW alone, dominant enough that without it
-      # the limiter's threshold is comparing apples to oranges.
-      # NOTE: road_load_power_w() formula is UNCHANGED (only the grade term is
-      # clamped — Section B is independent of road_load per plan instructions).
-      p_accel_grade_w = VEHICLE_MASS_KG * v_ego * abasis_for_power + grade_power_clamped_w
-      p_road_w = road_load_power_w(v_ego)
-      raw_power_w = max(0.0, p_accel_grade_w + p_road_w)
+      p_wheel_w = max(0.0, VEHICLE_MASS_KG * v_ego * a_net + road_load_power_w(v_ego))
+      raw_power_w = p_wheel_w / drivetrain_efficiency(v_ego) + self._aux_power_w
 
       # iter14 v2 — triple-output power estimator.
       # 1) estPowerInstantW: truly raw, no LP, no cap. Forensic / diagnosis only.
@@ -508,7 +469,7 @@ class CarStateExt:
         power_w_capped = self._ev_motor_cap_w
         power_was_capped = True
       ret_sp.estPowerCapped = bool(power_was_capped)
-      ret_sp.estPowerSaturated = bool(self._saturation_active)
+      ret_sp.estPowerSaturated = False   # iter17: saturation substitution retired
       ret_sp.evModeAssumed = bool(self._assume_ev_only)
       # iter13 v4 — publish param-read-success flag so device telemetry
       # distinguishes "param explicitly false" from "param read failed".
